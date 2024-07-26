@@ -466,7 +466,6 @@ func (s *clusterState) ApplyDigest(digest digest) {
 func (s *clusterState) ApplyDelta(delta delta) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	for _, entry := range delta {
 		s.applyDeltaEntry(entry)
 	}

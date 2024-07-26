@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/andydunstall/yamux"
@@ -34,20 +35,26 @@ type Server struct {
 
 	logger log.Logger
 
-	Conns map[net.Conn]time.Time
+	Conns    map[*net.Conn]time.Time
+	ConnsMux sync.Mutex
 }
 
 func (s *Server) connStateChange(c net.Conn, state http.ConnState) {
 	s.logger.Info("conn state change", zap.String("remote-addr", c.RemoteAddr().String()), zap.String("state", state.String()))
 	switch state {
 	case http.StateNew:
-		s.Conns[c] = time.Now()
+		s.ConnsMux.Lock()
+		s.Conns[&c] = time.Now()
+		s.ConnsMux.Unlock()
 		// c.Close()
 		s.logger.Info("new connection", zap.String("remote-addr", c.RemoteAddr().String()))
 	case http.StateClosed, http.StateHijacked:
-		delete(s.Conns, c)
+		s.ConnsMux.Lock()
+		delete(s.Conns, &c)
+		s.ConnsMux.Unlock()
 	}
 }
+
 func NewServer(
 	upstreams Manager,
 	verifier auth.Verifier,
@@ -69,7 +76,7 @@ func NewServer(
 		ctx:               ctx,
 		cancel:            cancel,
 		logger:            logger,
-		Conns:             make(map[net.Conn]time.Time),
+		Conns:             make(map[*net.Conn]time.Time),
 	}
 	server.httpServer.ConnState = server.connStateChange
 	// Recover from panics.
