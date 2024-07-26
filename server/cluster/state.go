@@ -43,6 +43,7 @@ func NewState(
 		logger:  logger.WithSubsystem("cluster"),
 	}
 	s.addMetricsNode(localNode.Status)
+	s.logger.Info("====================add a node")
 	return s
 }
 
