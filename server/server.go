@@ -281,30 +281,14 @@ func (s *Server) Start() error {
 	}
 	ticker := time.NewTicker(3 * time.Second)
 	go func() {
-		for _ = range ticker.C {
-			i := 0
-			s.upstreamServer.ConnsMux.Lock()
-			s.logger.Info("total connections", zap.Int("total", len(s.upstreamServer.Conns)))
-			for conn, _ := range s.upstreamServer.Conns {
-				(*conn).Close()
-				s.logger.Info("shedding", zap.Int("conn", i))
-				i++
-				if i >= 10 {
-					break
-				}
-			}
-			s.upstreamServer.ConnsMux.Unlock()
-		}
-	}()
-	go func() {
 		rebalancing := false
-		// var mu sync.Mutex
+		var mu sync.Mutex
 		shedding := func(localConn int) {
 			toShed := (localConn + 200) / 200
 			i := 0
 			s.upstreamServer.ConnsMux.Lock()
 			s.logger.Info("total connections", zap.Int("total", len(s.upstreamServer.Conns)))
-			for conn, _ := range s.upstreamServer.Conns {
+			for conn := range s.upstreamServer.Conns {
 				(*conn).Close()
 				s.logger.Info("shedding", zap.Int("local", localConn), zap.Int("conn", i))
 				i++
@@ -314,33 +298,33 @@ func (s *Server) Start() error {
 			}
 			s.upstreamServer.ConnsMux.Unlock()
 		}
-		for _ = range ticker.C {
+		for range ticker.C {
 			s.logger.Info("checking for rebalancing")
-			// mu.Lock()
+			mu.Lock()
 			if rebalancing {
-				// mu.Unlock()
+				mu.Unlock()
 				continue
 			}
 
 			if localConn := needRebalance(); localConn > 0 {
-				// mu.Lock()
+				mu.Lock()
 				rebalancing = true
-				// mu.Unlock()
+				mu.Unlock()
 				s.logger.Info("rebalancing", zap.Int("local", localConn))
 				go func() {
 					for {
 						shedding(localConn)
 						time.Sleep(time.Second)
 						if needRebalance() == 0 {
-							// mu.Lock()
+							mu.Lock()
 							rebalancing = false
-							// mu.Unlock()
+							mu.Unlock()
 							return
 						}
 					}
 				}()
 			}
-			// mu.Unlock()
+			mu.Unlock()
 		}
 	}()
 	return nil
