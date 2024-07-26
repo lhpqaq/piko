@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/go-sockaddr"
 	"github.com/prometheus/client_golang/prometheus"
@@ -262,7 +263,78 @@ func (s *Server) Start() error {
 		}
 	}
 
+	s.RebalanceDaemon()
+
 	return nil
+}
+
+func (s *Server) RebalanceDaemon() {
+	// TODO: conf
+	needRebalance := func() int {
+		nodes := s.clusterState.Nodes()
+		totalConns := 0
+		localConns := 0
+		for _, n := range nodes {
+			if n.ID == s.clusterState.LocalID() {
+				localConns = n.Metadata().Upstreams
+			}
+			totalConns += n.Metadata().Upstreams
+		}
+		s.logger.Info("cluster nodes", zap.Int("total", totalConns))
+		s.logger.Info("cluster nodes", zap.Int("local", localConns))
+		if localConns > ((totalConns / len(nodes)) * 6 / 5) {
+			return localConns
+		}
+		return 0
+	}
+
+	shedding := func(localConn int) {
+		toShed := (localConn + 200) / 200
+		i := 0
+		s.upstreamServer.ConnsMux.Lock()
+		s.logger.Info("total connections", zap.Int("total", len(s.upstreamServer.Conns)))
+		for conn := range s.upstreamServer.Conns {
+			(*conn).Close()
+			s.logger.Info("shedding", zap.Int("local", localConn), zap.Int("conn", i))
+			i++
+			if i >= toShed {
+				break
+			}
+		}
+		s.upstreamServer.ConnsMux.Unlock()
+	}
+	ticker := time.NewTicker(3 * time.Second)
+	go func() {
+		rebalancing := false
+		var mu sync.Mutex
+		for range ticker.C {
+			s.logger.Info("checking for rebalancing")
+			mu.Lock()
+			if rebalancing {
+				mu.Unlock()
+				continue
+			}
+			mu.Unlock()
+			if localConn := needRebalance(); localConn > 0 {
+				mu.Lock()
+				rebalancing = true
+				mu.Unlock()
+				s.logger.Info("rebalancing", zap.Int("local", localConn))
+				go func() {
+					for {
+						shedding(localConn)
+						time.Sleep(time.Second)
+						if needRebalance() == 0 {
+							mu.Lock()
+							rebalancing = false
+							mu.Unlock()
+							return
+						}
+					}
+				}()
+			}
+		}
+	}()
 }
 
 // Shutdown gracefully stops the server node.
