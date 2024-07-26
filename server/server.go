@@ -262,6 +262,14 @@ func (s *Server) Start() error {
 			s.logger.Info("joined cluster", zap.Strings("node-ids", nodeIDs))
 		}
 	}
+
+	s.RebalanceDaemon()
+
+	return nil
+}
+
+func (s *Server) RebalanceDaemon() {
+	// TODO: conf
 	needRebalance := func() int {
 		nodes := s.clusterState.Nodes()
 		totalConns := 0
@@ -305,7 +313,7 @@ func (s *Server) Start() error {
 				mu.Unlock()
 				continue
 			}
-
+			mu.Unlock()
 			if localConn := needRebalance(); localConn > 0 {
 				mu.Lock()
 				rebalancing = true
@@ -324,10 +332,8 @@ func (s *Server) Start() error {
 					}
 				}()
 			}
-			mu.Unlock()
 		}
 	}()
-	return nil
 }
 
 // Shutdown gracefully stops the server node.
