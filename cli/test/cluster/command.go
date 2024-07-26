@@ -168,10 +168,8 @@ func runCluster(
 	signalCh1 := make(chan os.Signal, 1)
 	signal.Notify(signalCh1, syscall.SIGINT, syscall.SIGTERM)
 	group.Add(func() error {
-		// 先等待一段时间
 		time.Sleep(time.Second * 10)
 
-		// 更新配置
 		conf.Nodes = 5
 		manager.Update(conf)
 		select {
