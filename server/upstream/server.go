@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"sync"
-	"time"
 
 	"github.com/andydunstall/yamux"
 	"github.com/gin-gonic/gin"
@@ -35,19 +34,16 @@ type Server struct {
 
 	logger log.Logger
 
-	Conns    map[*net.Conn]time.Time
+	Conns    map[*net.Conn]bool
 	ConnsMux sync.Mutex
 }
 
 func (s *Server) connStateChange(c net.Conn, state http.ConnState) {
-	s.logger.Info("conn state change", zap.String("remote-addr", c.RemoteAddr().String()), zap.String("state", state.String()))
 	switch state {
 	case http.StateNew:
 		s.ConnsMux.Lock()
-		s.Conns[&c] = time.Now()
+		s.Conns[&c] = true
 		s.ConnsMux.Unlock()
-		// c.Close()
-		s.logger.Info("new connection", zap.String("remote-addr", c.RemoteAddr().String()))
 	case http.StateClosed, http.StateHijacked:
 		s.ConnsMux.Lock()
 		delete(s.Conns, &c)
@@ -76,9 +72,10 @@ func NewServer(
 		ctx:               ctx,
 		cancel:            cancel,
 		logger:            logger,
-		Conns:             make(map[*net.Conn]time.Time),
+		Conns:             make(map[*net.Conn]bool),
 	}
 	server.httpServer.ConnState = server.connStateChange
+
 	// Recover from panics.
 	router.Use(gin.CustomRecoveryWithWriter(nil, server.panicRoute))
 

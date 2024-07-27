@@ -57,6 +57,8 @@ type Server struct {
 
 	registry *prometheus.Registry
 
+	RebalancingCancel context.CancelFunc
+
 	logger log.Logger
 }
 
@@ -263,77 +265,80 @@ func (s *Server) Start() error {
 		}
 	}
 
-	s.RebalanceDaemon()
+	s.RebalancingDaemon()
 
 	return nil
 }
 
-func (s *Server) RebalanceDaemon() {
-	// TODO: conf
-	needRebalance := func() int {
-		nodes := s.clusterState.Nodes()
-		totalConns := 0
-		localConns := 0
-		for _, n := range nodes {
-			if n.ID == s.clusterState.LocalID() {
-				localConns = n.Metadata().Upstreams
-			}
-			totalConns += n.Metadata().Upstreams
+func (s *Server) RebalancingDaemon() {
+	needRebalancing := func() (int, bool) {
+		totalConns, localConns := s.clusterState.TotalAndLocalUpstreams()
+		averageConns := float32(totalConns) /
+			float32(s.clusterState.NodesNum())
+		if float32(localConns) > averageConns*
+			(1+s.conf.Cluster.RebalancingThreshold) {
+			return localConns, true
 		}
-		s.logger.Info("cluster nodes", zap.Int("total", totalConns))
-		s.logger.Info("cluster nodes", zap.Int("local", localConns))
-		if localConns > ((totalConns / len(nodes)) * 6 / 5) {
-			return localConns
-		}
-		return 0
+		return 0, false
 	}
-	ticker := time.NewTicker(3 * time.Second)
-	go func() {
+
+	sheddingConnections := func(connsToShed int) {
+		i := 0
+		s.upstreamServer.ConnsMux.Lock()
+		for conn := range s.upstreamServer.Conns {
+			(*conn).Close()
+			delete(s.upstreamServer.Conns, conn)
+			i++
+			if i >= connsToShed {
+				break
+			}
+		}
+		s.upstreamServer.ConnsMux.Unlock()
+	}
+
+	startShedding := func(connsToShed int, rebalancing *bool, mu *sync.Mutex) {
+		mu.Lock()
+		*rebalancing = true
+		mu.Unlock()
+		for {
+			sheddingConnections(connsToShed)
+			time.Sleep(time.Second)
+			if _, needRebalance := needRebalancing(); !needRebalance {
+				mu.Lock()
+				*rebalancing = false
+				mu.Unlock()
+				return
+			}
+		}
+	}
+
+	s.runGoroutine(func() {
+		ticker := time.NewTicker(s.conf.Cluster.RebalancingCheckInterval)
+		defer ticker.Stop()
+		ctx, cancel := context.WithCancel(context.Background())
+		s.RebalancingCancel = cancel
 		rebalancing := false
 		var mu sync.Mutex
-		shedding := func(localConn int) {
-			toShed := (localConn + 200) / 200
-			i := 0
-			s.upstreamServer.ConnsMux.Lock()
-			s.logger.Info("total connections", zap.Int("total", len(s.upstreamServer.Conns)))
-			for conn := range s.upstreamServer.Conns {
-				(*conn).Close()
-				s.logger.Info("shedding", zap.Int("local", localConn), zap.Int("conn", i))
-				i++
-				if i >= toShed {
-					break
+		for {
+			select {
+			case <-ctx.Done():
+				s.logger.Debug("rebalancing daemon stopped")
+				return
+			case <-ticker.C:
+				mu.Lock()
+				if rebalancing {
+					mu.Unlock()
+					continue
+				}
+				mu.Unlock()
+
+				if localConn, needRebalance := needRebalancing(); needRebalance {
+					connsToShed := int(min(1, float32(localConn)*s.conf.Cluster.RebalancingRate))
+					go startShedding(connsToShed, &rebalancing, &mu)
 				}
 			}
-			s.upstreamServer.ConnsMux.Unlock()
 		}
-		for range ticker.C {
-			s.logger.Info("checking for rebalancing")
-			mu.Lock()
-			if rebalancing {
-				mu.Unlock()
-				continue
-			}
-			mu.Unlock()
-			if localConn := needRebalance(); localConn > 0 {
-				mu.Lock()
-				rebalancing = true
-				mu.Unlock()
-				s.logger.Info("rebalancing", zap.Int("local", localConn))
-				go func() {
-					for {
-						shedding(localConn)
-						time.Sleep(time.Second)
-						if needRebalance() == 0 {
-							mu.Lock()
-							rebalancing = false
-							mu.Unlock()
-							return
-						}
-					}
-				}()
-			}
-		}
-	}()
+	})
 }
 
 // Shutdown gracefully stops the server node.
@@ -379,6 +384,8 @@ func (s *Server) Shutdown() {
 	s.shutdownAdminServer(ctx)
 
 	s.shutdownUsageReporting()
+
+	s.RebalancingCancel()
 
 	s.wg.Wait()
 
