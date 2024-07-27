@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	rungroup "github.com/oklog/run"
 	"github.com/spf13/cobra"
@@ -164,28 +163,7 @@ func runCluster(
 	}, func(error) {
 		signalCancel()
 	})
-	signalCtx1, signalCancel1 := context.WithCancel(context.Background())
-	signalCh1 := make(chan os.Signal, 1)
-	signal.Notify(signalCh1, syscall.SIGINT, syscall.SIGTERM)
-	group.Add(func() error {
-		time.Sleep(time.Second * 10)
 
-		conf.Nodes = 5
-		manager.Update(conf)
-		select {
-		case sig := <-signalCh1:
-			logger.Info(
-				"received shutdown signal",
-				zap.String("signal", sig.String()),
-			)
-			return nil
-		case <-signalCtx1.Done():
-			return nil
-		}
-
-	}, func(error) {
-		signalCancel1()
-	})
 	if err := group.Run(); err != nil {
 		return err
 	}
